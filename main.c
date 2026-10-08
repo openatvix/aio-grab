@@ -169,7 +169,7 @@ static int hisi_uses_composited_snapshot(void);
 void getvideo(unsigned char *video, int *xres, int *yres);
 void getvideo2(unsigned char *video, int *xres, int *yres);
 void getosd(unsigned char *osd, int *xres, int *yres);
-void smooth_resize(const unsigned char *source, unsigned char *dest, int xsource, int ysource, int xdest, int ydest, int colors); 
+void smooth_resize(const unsigned char *source, unsigned char *dest, int xsource, int ysource, int xdest, int ydest, int colors);
 void fast_resize(const unsigned char *source, unsigned char *dest, int xsource, int ysource, int xdest, int ydest, int colors);
 void (*resize)(const unsigned char *source, unsigned char *dest, int xsource, int ysource, int xdest, int ydest, int colors);
 void combine(unsigned char *output, const unsigned char *video, const unsigned char *osd, int vleft, int vtop, int vwidth, int vheight, int xres, int yres);
@@ -187,7 +187,8 @@ static enum {UNKNOWN, DMNEW, WETEK, AZBOX863x, AZBOX865x, ST, PALLAS, VULCAN, XI
 static int stb_supports_uhd_grab_buffers(void)
 {
 	return stb_type == DMNEW ||
-	       stb_type == BRCM7439 ||      /* Dreambox DM900/DM920 */
+	       stb_type == BRCM7439 ||      /* Dreambox DM900 */
+	       stb_type == BRCM7252S ||     /* Dreambox DM920 */
 	       stb_type == BRCM7439DAGS ||
 	       stb_type == BRCM72604 ||
 	       stb_type == BRCM72604VU;
@@ -311,12 +312,10 @@ static inline void clamp_rect(int *L,int *T,int *W,int *H,int outW,int outH)
     if (*W < 1) *W = 1;
     if (*H < 1) *H = 1;
 }
-
-
 /*
  * Automatic ffmpeg stream backend.
  *
- * Dream receivers only for now: DM900/DM920 (BRCM7439) and
+ * Dream receivers only for now: DM900/DM920 (BRCM7439/BCM7252S) and
  * DreamOne/DreamTwo (DMNEW) can expose HEVC/UHD decoder surfaces in a
  * hardware-private layout that is not safely readable as
  * linear YUV from /dev/mem or /dev/videograbber.  DreamOS/FreezeFrame handles
@@ -766,7 +765,6 @@ static int grab_get_current_stream_input(char *out, size_t out_len, const char *
 
 	return -1;
 }
-
 static int grab_run_argv(char *const argv[])
 {
 	pid_t pid;
@@ -1053,18 +1051,17 @@ static int grab_ffmpeg_backend_should_autouse(int *src_w, int *src_h)
 	 * On DreamOne/DreamTwo also route PAL SD 720x576-like services through
 	 * ffmpeg, because the native /dev/videograbber path can return corrupted
 	 * SD frames there as well.
-	 * On DM900/DM920 also route IPTV service references through ffmpeg.
-	 * Some IPTV services do not expose enough reliable decoder metadata early
-	 * enough for the raw BRCM7439 path decision, while the direct stream URL
-	 * can be decoded cleanly by ffmpeg. */
-	if ((stb_type == BRCM7439 || stb_type == DMNEW) &&
-	    (w > 1920 || h > 1080 || hevc || dmnew_sd576 || (stb_type == BRCM7439 && iptv)))
+	 * On DM900/DM920 (BRCM7439/BRCM7252S) also route IPTV service references
+	 * through ffmpeg.  Some IPTV services do not expose enough reliable
+	 * decoder metadata early enough for the raw BRCM7439 path decision,
+	 * while the direct stream URL can be decoded cleanly by ffmpeg. */
+	if ((stb_type == BRCM7439 || stb_type == BRCM7252S || stb_type == DMNEW) &&
+	    (w > 1920 || h > 1080 || hevc || dmnew_sd576 ||
+	     ((stb_type == BRCM7439 || stb_type == BRCM7252S) && iptv)))
 		return 1;
 
 	return 0;
 }
-
-
 static const char *grab_ffmpeg_loglevel(void)
 {
 	const char *env = getenv("GRAB_FFMPEG_LOGLEVEL");
@@ -1508,7 +1505,6 @@ static int grab_ffmpeg_snapshot(const char *filename, int video_only, int osd_on
 	unlink(video_tmp);
 	return ret;
 }
-
 // main program
 
 int main(int argc, char **argv)
@@ -1732,14 +1728,17 @@ int main(int argc, char **argv)
 					stb_type = BRCM7251;
 					break;
 				}
+				/* Must be checked before the plain "7252" test, otherwise
+				 * /proc/stb/info/chipset containing "bcm7252s" (DM920) would
+				 * be misdetected as BRCM7252 (a different SoC). */
+				else if (strstr(buf,"7252S") || strstr(buf,"7252s"))
+				{
+					stb_type = BRCM7252S;
+					break;
+				}
 				else if (strstr(buf,"7252"))
 				{
 					stb_type = BRCM7252;
-					break;
-				}
-				else if (strstr(buf,"7252S"))
-				{
-					stb_type = BRCM7252S;
 					break;
 				}
 				else if (strstr(buf,"7278"))
@@ -1870,7 +1869,18 @@ int main(int argc, char **argv)
 			char buf[32];
 			while (fgets(buf, sizeof(buf), file))
 			{
-				if (strcasestr(buf,"DM500HD") || strcasestr(buf,"DM800SE") || strcasestr(buf,"DM7020HD"))
+				/* DM920 must be checked before the generic DM900/DM920 match,
+				 * because the BCM7252S video decoder needs its own unpack path.
+				 * strcasestr() is case-insensitive, so "dm920", "DM920", "Dm920"
+				 * all match. */
+				if (strcasestr(buf,"DM920"))
+				{
+					stb_type = BRCM7252S;
+					if (!quiet)
+						fprintf(stderr, "Detected Dreambox DM920 (BCM7252S)\n");
+					break;
+				}
+				else if (strcasestr(buf,"DM500HD") || strcasestr(buf,"DM800SE") || strcasestr(buf,"DM7020HD"))
 				{
 					stb_type = BRCM7405;
 					break;
@@ -1895,7 +1905,7 @@ int main(int argc, char **argv)
 					stb_type = BRCM7401;
 					break;
 				}
-				else if (strcasestr(buf,"DM900") || strcasestr(buf,"DM920"))
+				else if (strcasestr(buf,"DM900"))
 				{
 					stb_type = BRCM7439;
 					break;
@@ -1951,7 +1961,6 @@ int main(int argc, char **argv)
 		case BRCM7552:
 		case BRCM7251:
 		case BRCM7252:
-		case BRCM7252S:
 		case BRCM7278:
 		case BRCM7581:
 		case BRCM7584:
@@ -1978,6 +1987,16 @@ int main(int argc, char **argv)
 		case BRCM7425:
 		case BRCM7435:
 			registeroffset = 0x10600000;
+			chr_luma_stride = 0x80;
+			chr_luma_register_offset = 0x34;
+			mem2memdma_register = 0;
+			break;
+		case BRCM7252S:
+			/* DM920: BCM7252S video decoder. Same MMIO window as BCM7439
+			 * but the userspace unpack must use the interleaved luma+chroma
+			 * loop (see getvideo()) to avoid the horizontal chroma stripes
+			 * that the split two-loop version produces on this silicon. */
+			registeroffset = 0xf0600000;
 			chr_luma_stride = 0x80;
 			chr_luma_register_offset = 0x34;
 			mem2memdma_register = 0;
@@ -2173,7 +2192,7 @@ int main(int argc, char **argv)
 			if (grab_ffmpeg_getvideo_frame(video, &xres_v, &yres_v, width, NULL) < 0)
 				fprintf(stderr, "ffmpeg backend failed; refusing unsafe raw HEVC/UHD/SD/IPTV video grab\n");
 		}
-		else if (stb_type == BRCM7366 || stb_type == BRCM7251 || stb_type == BRCM7252 || stb_type == BRCM7252S || stb_type == BRCM7444 || stb_type == BRCM72604VU || stb_type == BRCM7278 || stb_type == HISIL_ARM)
+		else if (stb_type == BRCM7366 || stb_type == BRCM7251 || stb_type == BRCM7252 || stb_type == BRCM7444 || stb_type == BRCM72604VU || stb_type == BRCM7278 || stb_type == HISIL_ARM)
 		{
 			getvideo2(video, &xres_v,&yres_v);
 		}
@@ -2584,1085 +2603,6 @@ post_merge:
     if (hisi_lib_common) dlclose(hisi_lib_common);
 	return 0;
 }
-
-
-/* ============================================================
- * HiSilicon video grab backends
- *
- * 3798cv200:
- *   HI_UNF_DISP_AcquireSnapshot() returns a YUV420 semi-planar frame.
- *
- * 3798mv200 / 3798mv300:
- *   HI_UNF_DISP_AcquireSnapshot() returns a YUV420 semi-planar frame but can
- *   already contain the hardware-composed video+OSD output.  For all/default
- *   mode that composed snapshot is useful and avoids a second software blend.
- *   For video-only mode first try the VO/window capture path, because that is
- *   the only plausible way to get the video plane before OSD composition.  If
- *   VO capture fails, fall back to DISP snapshot and warn that the result may
- *   still contain OSD.
- *   Some vendor grabs map only u32YAddr and derive chroma by
- *   u32CAddr - u32YAddr because u32CAddr may not be page-aligned.
- *
- * 3716mv430:
- *   HI_UNF_DISP_AcquireSnapshot() is not the correct video path.
- *   The vendor grab binary uses:
- *     HI_SYS_Init
- *     HI_UNF_DISP_Init
- *     HI_UNF_VO_Init
- *     HI_MPI_WIN_GetHandle(&winInfo)
- *     HI_UNF_VO_CapturePicture(hWin, &cap)
- *     HI_TDE2_MbBlit(...)
- *     HI_MMZ_Map(dstPhys)
- *   The captured picture is macroblock/tiled YUV, so CPU NV21 conversion is
- *   not sufficient. TDE must de-tile/convert it to a linear BGR888/RGB888 buffer.
- *
- * 3716mv410:
- *   Old vendor grab -v triggers /proc/msp/win0100 capture and reads the
- *   generated planar YUV420 file from /home/capturevideo.
- * ============================================================ */
-
-/* HiSilicon basic types */
-typedef unsigned int   HI_U32;
-typedef unsigned char  HI_U8;
-typedef int            HI_S32;
-typedef void           HI_VOID;
-typedef HI_U32         HI_HANDLE;
-
-#define HI_SUCCESS      0
-#define HI_UNF_DISPLAY1 1
-#define HI_DRV_DISPLAY_1 1
-#define HI_UNF_VO_DEV_MODE_NORMAL 0
-
-#define HISI_TDE_COLOR_FMT_YCBCR420MBP 6
-#define HISI_TDE_COLOR_FMT_BGR888      7
-
-
-/*
- * HI_UNF_VIDEO_FRAME_INFO_S - layout used by the 3798 DISP snapshot path.
- * Allocated on heap (4096 bytes) because some SDK builds write beyond the
- * public struct size.
- */
-typedef struct {
-	HI_U32  u32Unk0;        /* 0x00 */
-	HI_U32  u32YPhyAddr;    /* 0x04 - luma physical address */
-	HI_U32  u32CPhyAddr;    /* 0x08 - chroma physical address */
-	HI_U32  u32Unk0c;       /* 0x0c */
-	HI_U32  u32YStride;     /* 0x10 - luma stride */
-	HI_U32  u32CStride;     /* 0x14 - chroma stride */
-	HI_U32  u32Pad1[7];     /* 0x18 - 0x30 */
-	HI_U32  u32Width;       /* 0x34 - frame width in pixels */
-	HI_U32  u32Height;      /* 0x38 - frame height in pixels */
-	HI_U32  u32Pad2[7];     /* 0x3c - 0x53 */
-	HI_U32  u32PixelFormat; /* 0x54 - 1 = NV21 (YUV420 semi-planar) */
-	HI_U32  u32Pad3[64];    /* remaining fields / SDK-private tail */
-} HI_UNF_VIDEO_FRAME_INFO_S;
-
-/* 3716mv410/mv430: UNF capture struct fields consumed by the vendor grab binary. */
-typedef struct {
-	HI_U32  u32Unk0;        /* 0x00 */
-	HI_U32  u32YPhyAddr;    /* 0x04 */
-	HI_U32  u32CPhyAddr;    /* 0x08 */
-	HI_U32  u32Unk0c;       /* 0x0c */
-	HI_U32  u32YStride;     /* 0x10 */
-	HI_U32  u32CStride;     /* 0x14 */
-	HI_U32  u32Pad1[7];     /* 0x18 - 0x30 */
-	HI_U32  u32Width;       /* 0x34 */
-	HI_U32  u32Height;      /* 0x38 */
-	HI_U32  u32Pad2[128];   /* SDK-private tail */
-} HI_UNF_3716_CAPTURE_INFO_S;
-
-/*
- * 3716mv410/mv430 WIN_GET_HANDLE_S as used by the vendor grab source:
- *   enDisp = HI_DRV_DISPLAY_1;
- *   HI_MPI_WIN_GetHandle(&winInfo);
- *   hWin = winInfo.ahWinHandle[0] when u32WinNumber > 0.
- */
-typedef struct {
-	HI_U32    enDisp;          /* 0x00: HI_DRV_DISPLAY_1 */
-	HI_U32    u32WinNumber;    /* 0x04: number of handles returned */
-	HI_HANDLE ahWinHandle[16]; /* 0x08: first usable window handle */
-} WIN_GET_HANDLE_S;
-
-/* Minimal TDE structures matching the old grab call frames. */
-typedef struct {
-	HI_S32 s32Xpos;
-	HI_S32 s32Ypos;
-	HI_U32 u32Width;
-	HI_U32 u32Height;
-} HI_TDE2_RECT_S;
-
-typedef struct {
-	HI_U32 enColorFmt;       /* 6 = YCbCr420 macroblock picture */
-	HI_U32 u32YPhyAddr;
-	HI_U32 u32Width;
-	HI_U32 u32Height;
-	HI_U32 u32YStride;
-	HI_U32 u32CbCrPhyAddr;
-	HI_U32 u32CbCrStride;
-} HI_TDE2_MB_S;
-
-typedef struct {
-	HI_U32 u32PhyAddr;
-	HI_U32 enColorFmt;       /* 7 = RGB888 in the old grab binary */
-	HI_U32 u32Height;
-	HI_U32 u32Width;
-	HI_U32 u32Stride;
-	HI_U32 u32AlphaPhyAddr;
-	HI_U32 u32ClutPhyAddr;
-	HI_U32 bAlphaMax255;
-	HI_U32 bAlphaExt1555;
-	HI_U8  bYCbCrClut;
-	HI_U8  u8Alpha0;
-	HI_U8  u8Alpha1;
-	HI_U8  u8Reserved;
-	HI_U32 u32Reserved[2];
-} HI_TDE2_SURFACE_S;
-
-typedef struct {
-	HI_U32 u32Word[9];       /* old grab sets word[5]=1, word[6]=3 */
-} HI_TDE2_MBOPT_S;
-
-/* Function pointer types for dynamically loaded HiSi symbols */
-typedef HI_S32 (*PFN_HI_SYS_Init)(HI_VOID);
-typedef HI_S32 (*PFN_HI_SYS_DeInit)(HI_VOID);
-typedef HI_S32 (*PFN_HI_UNF_DISP_Init)(HI_VOID);
-typedef HI_S32 (*PFN_HI_UNF_DISP_DeInit)(HI_VOID);
-typedef HI_S32 (*PFN_HI_UNF_DISP_Open)(HI_U32 enDisp);
-typedef HI_S32 (*PFN_HI_UNF_DISP_AcquireSnapshot)(HI_U32 enDisp, HI_UNF_VIDEO_FRAME_INFO_S *pstSnapShot);
-typedef HI_S32 (*PFN_HI_UNF_DISP_ReleaseSnapshot)(HI_U32 enDisp, const HI_UNF_VIDEO_FRAME_INFO_S *pstSnapShot);
-typedef HI_S32 (*PFN_HI_UNF_VO_Init)(HI_U32 enDevMode);
-typedef HI_S32 (*PFN_HI_UNF_VO_DeInit)(HI_VOID);
-typedef HI_S32 (*PFN_HI_UNF_VO_CapturePicture)(HI_HANDLE hWin, HI_UNF_3716_CAPTURE_INFO_S *pstCapPicture);
-typedef HI_S32 (*PFN_HI_UNF_VO_CapturePictureRelease)(HI_HANDLE hWin, const HI_UNF_3716_CAPTURE_INFO_S *pstCapPicture);
-typedef HI_S32 (*PFN_HI_MPI_WIN_GetHandle)(WIN_GET_HANDLE_S *pstWinHandle);
-typedef HI_U32 (*PFN_HI_MMZ_New)(HI_U32 u32Size, HI_U32 u32Align, HI_VOID *pszZoneName, const char *pszMmbName);
-typedef HI_S32 (*PFN_HI_MMZ_Delete)(HI_U32 u32PhyAddr);
-typedef void*  (*PFN_HI_MMZ_Map)(HI_U32 u32PhyAddr, HI_U32 u32Cached);
-typedef HI_S32 (*PFN_HI_MMZ_Unmap)(HI_U32 u32PhyAddr);
-typedef HI_S32 (*PFN_HI_TDE2_Open)(HI_VOID);
-typedef HI_S32 (*PFN_HI_TDE2_Close)(HI_VOID);
-typedef HI_S32 (*PFN_HI_TDE2_BeginJob)(HI_VOID);
-typedef HI_S32 (*PFN_HI_TDE2_EndJob)(HI_S32 s32Handle, HI_U32 bSync, HI_U32 bBlock, HI_U32 u32TimeOut);
-typedef HI_S32 (*PFN_HI_TDE2_MbBlit)(HI_S32 s32Handle, const HI_TDE2_MB_S *pstMB, const HI_TDE2_RECT_S *pstMBRect,
-							 const HI_TDE2_SURFACE_S *pstDst, const HI_TDE2_RECT_S *pstDstRect, const HI_TDE2_MBOPT_S *pstOpt);
-
-static void hisi_preload_one(const char *name)
-{
-	void *h;
-	if (!name || !*name)
-		return;
-	h = dlopen(name, RTLD_LAZY | RTLD_GLOBAL);
-	(void)h;
-}
-
-static void hisi_preload_runtime_libs(void)
-{
-	/* libhi_msp on 3716mv410/mv430 may depend on the JPEG/HIGO stack when loaded directly. */
-	static const char *libs[] = {
-		"libjpeg.so", "libjpeg.so.8", "libjpeg.so.62", "libjpeg9b.so",
-		"/usr/lib/libjpeg.so", "/usr/lib/libjpeg.so.8", "/usr/lib/libjpeg.so.62", "/usr/lib/libjpeg9b.so",
-		"libz.so.1", "libpng16.so.16", "libatomic.so.1",
-		"/usr/lib/libhi_securec.so", "/usr/lib/libhigo.so", "/usr/lib/libhigoadp.so",
-		"/usr/lib/libhi_so.so", "/usr/lib/libhi_ttx.so", "/usr/lib/libhi_cc.so",
-		"/usr/lib/libhi_subtitle.so",
-		NULL
-	};
-	int i;
-	for (i = 0; libs[i]; i++)
-		hisi_preload_one(libs[i]);
-}
-
-static void *hisi_sym(void *preferred, void *fallback, const char *name)
-{
-	void *p = NULL;
-	if (preferred)
-		p = dlsym(preferred, name);
-	if (!p && fallback)
-		p = dlsym(fallback, name);
-	return p;
-}
-
-/*
- * Some 3798 images ship /usr/lib/libhi_msp.so with PT_GNU_STACK marked
- * executable (RWE).  Loading that library through dlopen() can fail on the
- * running OpenATV kernel with:
- *   cannot enable executable stack as shared object requires: Invalid argument
- * The vendor grab has libhi_msp.so in DT_NEEDED and therefore does not hit the
- * late-dlopen path.  For aio-grab keep the generic dlopen design, but if this
- * exact failure happens, create a private /tmp copy of libhi_msp.so and clear
- * PF_X from its PT_GNU_STACK header before dlopen().  No code segment is
- * changed; only the stack permission request in the ELF program header is
- * relaxed.
- */
-static int hisi_copy_file(int in, int out)
-{
-	char buf[16384];
-	ssize_t rd;
-	while ((rd = read(in, buf, sizeof(buf))) > 0) {
-		char *p = buf;
-		ssize_t left = rd;
-		while (left > 0) {
-			ssize_t wr = write(out, p, (size_t)left);
-			if (wr <= 0)
-				return -1;
-			p += wr;
-			left -= wr;
-		}
-	}
-	return rd == 0 ? 0 : -1;
-}
-
-static int hisi_clear_elf32_execstack(const char *path)
-{
-	int fd = -1;
-	Elf32_Ehdr eh;
-	int i;
-
-	fd = open(path, O_RDWR);
-	if (fd < 0)
-		return -1;
-
-	if (read(fd, &eh, sizeof(eh)) != (ssize_t)sizeof(eh)) {
-		close(fd);
-		return -1;
-	}
-
-	if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
-		eh.e_ident[EI_CLASS] != ELFCLASS32 ||
-		eh.e_ident[EI_DATA] != ELFDATA2LSB ||
-		eh.e_phoff == 0 || eh.e_phentsize != sizeof(Elf32_Phdr) || eh.e_phnum == 0) {
-		close(fd);
-		return -1;
-	}
-
-	for (i = 0; i < eh.e_phnum; i++) {
-		Elf32_Phdr ph;
-		off_t off = (off_t)eh.e_phoff + (off_t)i * (off_t)eh.e_phentsize;
-		if (lseek(fd, off, SEEK_SET) < 0 || read(fd, &ph, sizeof(ph)) != (ssize_t)sizeof(ph)) {
-			close(fd);
-			return -1;
-		}
-		if (ph.p_type == PT_GNU_STACK) {
-			if (ph.p_flags & PF_X) {
-				ph.p_flags &= ~PF_X;
-				if (lseek(fd, off, SEEK_SET) < 0 || write(fd, &ph, sizeof(ph)) != (ssize_t)sizeof(ph)) {
-					close(fd);
-					return -1;
-				}
-			}
-			close(fd);
-			return 0;
-		}
-	}
-
-	close(fd);
-	return -1;
-}
-
-static int hisi_make_noexecstack_copy(const char *src, char *dst, size_t dst_len)
-{
-	int in = -1, out = -1;
-	mode_t old_umask;
-
-	if (!src || !dst || dst_len < 32 || src[0] != '/')
-		return -1;
-
-	snprintf(dst, dst_len, "/tmp/aio-grab-libhi_msp-nx-%ld.so", (long)getpid());
-
-	in = open(src, O_RDONLY);
-	if (in < 0)
-		return -1;
-
-	old_umask = umask(022);
-	out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-	umask(old_umask);
-	if (out < 0) {
-		close(in);
-		return -1;
-	}
-
-	if (hisi_copy_file(in, out) < 0) {
-		close(in);
-		close(out);
-		unlink(dst);
-		return -1;
-	}
-	close(in);
-	if (close(out) < 0) {
-		unlink(dst);
-		return -1;
-	}
-
-	if (hisi_clear_elf32_execstack(dst) < 0) {
-		unlink(dst);
-		return -1;
-	}
-
-	return 0;
-}
-
-static void *hisi_dlopen_msp_with_execstack_fallback(const char *path)
-{
-	void *h;
-	const char *err;
-	char nx_path[256];
-
-	if (!path || !*path)
-		return NULL;
-
-	h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-	if (h)
-		return h;
-
-	err = dlerror();
-	if (!err)
-		return NULL;
-
-	if (strstr(err, "executable stack") == NULL &&
-		strstr(err, "cannot enable executable") == NULL) {
-		return NULL;
-	}
-
-	if (!quiet)
-		fprintf(stderr, "getvideo_hisi: %s needs executable stack, trying private noexecstack copy\n", path);
-
-	if (hisi_make_noexecstack_copy(path, nx_path, sizeof(nx_path)) < 0) {
-		if (!quiet)
-			fprintf(stderr, "getvideo_hisi: could not create noexecstack copy of %s: %s\n", path, strerror(errno));
-		return NULL;
-	}
-
-	h = dlopen(nx_path, RTLD_NOW | RTLD_GLOBAL);
-	if (!h) {
-		if (!quiet)
-			fprintf(stderr, "getvideo_hisi: dlopen noexecstack copy failed: %s\n", dlerror());
-		unlink(nx_path);
-		return NULL;
-	}
-
-	unlink(nx_path);
-
-	return h;
-}
-
-static int hisi_uses_chip_backend(void)
-{
-	switch (stb_type) {
-	case HISI_3716MV410:
-	case HISI_3716MV430:
-	case HISI_3798CV200:
-	case HISI_3798MV200:
-	case HISI_3798MV300:
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-static int hisi_uses_composited_snapshot(void)
-{
-	return stb_type == HISI_3798MV200 || stb_type == HISI_3798MV300;
-}
-
-static int hisi_get_fb_size(int *w, int *h)
-{
-	int fd;
-	struct fb_var_screeninfo var;
-	if (!w || !h)
-		return -1;
-	*w = 0;
-	*h = 0;
-	fd = open("/dev/fb0", O_RDONLY);
-	if (fd < 0)
-		fd = open("/dev/fb/0", O_RDONLY);
-	if (fd < 0)
-		return -1;
-	memset(&var, 0, sizeof(var));
-	if (ioctl(fd, FBIOGET_VSCREENINFO, &var) < 0) {
-		close(fd);
-		return -1;
-	}
-	close(fd);
-	if (!var.xres || !var.yres)
-		return -1;
-	*w = (int)var.xres;
-	*h = (int)var.yres;
-	return 0;
-}
-
-static int hisi_open_libs(void)
-{
-	if (hisi_lib_common && hisi_lib_msp)
-		return 0;
-
-	hisi_preload_runtime_libs();
-
-	hisi_lib_common = dlopen("/usr/lib/libhi_common.so", RTLD_NOW | RTLD_GLOBAL);
-	if (!hisi_lib_common) {
-		fprintf(stderr, "getvideo_hisi: dlopen libhi_common.so failed: %s\n", dlerror());
-		return -1;
-	}
-
-	hisi_lib_msp = hisi_dlopen_msp_with_execstack_fallback("/usr/lib/libhi_msp.so");
-	if (!hisi_lib_msp)
-		hisi_lib_msp = dlopen("libhi_msp.so", RTLD_NOW | RTLD_GLOBAL);
-	if (!hisi_lib_msp) {
-		fprintf(stderr, "getvideo_hisi: dlopen libhi_msp.so failed: %s\n", dlerror());
-		return -1;
-	}
-	return 0;
-}
-
-static void getvideo_hisi_snapshot(unsigned char *video, int *xres, int *yres)
-{
-	HI_S32 ret;
-	HI_U32 display = HI_UNF_DISPLAY1;
-
-	*xres = 0;
-	*yres = 0;
-
-	if (hisi_open_libs() < 0)
-		return;
-
-	/* Resolve symbols */
-	PFN_HI_SYS_Init              pfnSysInit    = (PFN_HI_SYS_Init)dlsym(hisi_lib_common, "HI_SYS_Init");
-	PFN_HI_SYS_DeInit            pfnSysDeInit  = (PFN_HI_SYS_DeInit)dlsym(hisi_lib_common, "HI_SYS_DeInit");
-	PFN_HI_UNF_DISP_Init         pfnDispInit   = (PFN_HI_UNF_DISP_Init)dlsym(hisi_lib_msp,    "HI_UNF_DISP_Init");
-	PFN_HI_UNF_DISP_Open         pfnDispOpen   = (PFN_HI_UNF_DISP_Open)dlsym(hisi_lib_msp,    "HI_UNF_DISP_Open");
-	PFN_HI_UNF_DISP_AcquireSnapshot pfnAcquire = (PFN_HI_UNF_DISP_AcquireSnapshot)dlsym(hisi_lib_msp,    "HI_UNF_DISP_AcquireSnapshot");
-	PFN_HI_UNF_DISP_ReleaseSnapshot pfnRelease = (PFN_HI_UNF_DISP_ReleaseSnapshot)dlsym(hisi_lib_msp,    "HI_UNF_DISP_ReleaseSnapshot");
-	PFN_HI_MMZ_Map               pfnMMZMap     = (PFN_HI_MMZ_Map)hisi_sym(hisi_lib_common, hisi_lib_msp, "HI_MMZ_Map");
-	PFN_HI_MMZ_Unmap             pfnMMZUnmap   = (PFN_HI_MMZ_Unmap)hisi_sym(hisi_lib_common, hisi_lib_msp, "HI_MMZ_Unmap");
-
-	if (!pfnSysInit || !pfnDispInit || !pfnDispOpen ||
-		!pfnAcquire || !pfnRelease || !pfnMMZMap || !pfnMMZUnmap) {
-		fprintf(stderr, "getvideo_hisi: dlsym failed for 3798 snapshot functions\n");
-		return;
-	}
-
-	ret = pfnSysInit();
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi: HI_SYS_Init failed: 0x%x\n", ret);
-		return;
-	}
-
-	ret = pfnDispInit();
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi: HI_UNF_DISP_Init failed: 0x%x\n", ret);
-		goto cleanup_sys;
-	}
-
-	ret = pfnDispOpen(display);
-	if (ret != HI_SUCCESS) {
-		if (!quiet)
-			fprintf(stderr, "getvideo_hisi: HI_UNF_DISP_Open display=%u failed: 0x%x (ignoring)\n", display, ret);
-	}
-
-	HI_UNF_VIDEO_FRAME_INFO_S *pFrame = (HI_UNF_VIDEO_FRAME_INFO_S*)calloc(1, 4096);
-	if (!pFrame) {
-		fprintf(stderr, "getvideo_hisi: calloc failed\n");
-		goto cleanup_sys;
-	}
-
-	ret = pfnAcquire(display, pFrame);
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi: HI_UNF_DISP_AcquireSnapshot display=%u failed: 0x%x\n", display, ret);
-		free(pFrame);
-		goto cleanup_sys;
-	}
-
-	if (!pFrame->u32Width || !pFrame->u32Height ||
-		!pFrame->u32YPhyAddr || !pFrame->u32CPhyAddr) {
-		fprintf(stderr, "getvideo_hisi: invalid frame info\n");
-		goto cleanup_snapshot;
-	}
-
-	unsigned char *y_virt  = (unsigned char*)pfnMMZMap(pFrame->u32YPhyAddr, 0);
-	if (!y_virt) {
-		fprintf(stderr, "getvideo_hisi: HI_MMZ_Map Y failed\n");
-		goto cleanup_snapshot;
-	}
-
-	int w       = (int)pFrame->u32Width;
-	int h       = (int)pFrame->u32Height;
-	int ystride = (int)pFrame->u32YStride;
-	int cstride = (int)pFrame->u32CStride;
-
-	/*
-	 * On some 3798 images the vendor grab calls HI_MMZ_Map only once with
-	 * u32YAddr.  u32CAddr is inside the same MMZ allocation and can be
-	 * non-page-aligned, so mapping u32CAddr separately may fail.
-	 * Keep the separate-map fallback for SDKs where Y and C are different MMBs.
-	 */
-	unsigned char *uv_virt = NULL;
-	int uv_mapped_separately = 0;
-	HI_U32 uv_offset = 0;
-	if (pFrame->u32CPhyAddr > pFrame->u32YPhyAddr) {
-		HI_U32 min_uv_offset = (HI_U32)ystride * (HI_U32)h;
-		uv_offset = pFrame->u32CPhyAddr - pFrame->u32YPhyAddr;
-		if (uv_offset >= min_uv_offset && uv_offset < (64U * 1024U * 1024U)) {
-			uv_virt = y_virt + uv_offset;
-			if (!quiet)
-				fprintf(stderr, "getvideo_hisi: using contiguous MMZ chroma offset 0x%x\n", uv_offset);
-		}
-	}
-
-	if (!uv_virt) {
-		uv_virt = (unsigned char*)pfnMMZMap(pFrame->u32CPhyAddr, 0);
-		uv_mapped_separately = 1;
-	}
-	if (!uv_virt) {
-		fprintf(stderr, "getvideo_hisi: HI_MMZ_Map UV failed y=0x%x c=0x%x\n",
-			pFrame->u32YPhyAddr, pFrame->u32CPhyAddr);
-		pfnMMZUnmap(pFrame->u32YPhyAddr);
-		goto cleanup_snapshot;
-	}
-
-	/* Convert NV21 (YUV420 semi-planar, V before U) to internal BGR. */
-	int i, j;
-	for (i = 0; i < h; i++) {
-		for (j = 0; j < w; j++) {
-			int y = y_virt[i * ystride + j];
-			int c0 = uv_virt[(i / 2) * cstride + (j & ~1)];
-			int c1 = uv_virt[(i / 2) * cstride + (j & ~1) + 1];
-			int v = c0;
-			int u = c1;
-
-			y -= 16;
-			u -= 128;
-			v -= 128;
-
-			int r = CLAMP((298 * y + 409 * v + 128) >> 8);
-			int g = CLAMP((298 * y - 100 * u - 208 * v + 128) >> 8);
-			int b = CLAMP((298 * y + 516 * u + 128) >> 8);
-
-			int off = (i * w + j) * 3;
-			video[off + 0] = (unsigned char)b;
-			video[off + 1] = (unsigned char)g;
-			video[off + 2] = (unsigned char)r;
-		}
-	}
-
-	*xres = w;
-	*yres = h;
-
-	if (uv_mapped_separately)
-		pfnMMZUnmap(pFrame->u32CPhyAddr);
-	pfnMMZUnmap(pFrame->u32YPhyAddr);
-
-cleanup_snapshot:
-	pfnRelease(display, pFrame);
-	free(pFrame);
-
-cleanup_sys:
-	if (pfnSysDeInit)
-		pfnSysDeInit();
-}
-
-
-/*
- * 3716mv410 video backend.
- *
- * The old working mv410 grab binary does not use the mv430 WIN/VO/TDE path for
- * "grab -v". Static analysis shows the video-only path executes:
- *
- *   rm -rf /home/capturevideo
- *   mkdir /home/capturevideo
- *   echo capture /home/capturevideo > /proc/msp/win0100
- *
- * Then it reads the created YUV420 planar dump from /home/capturevideo and
- * parses width/height from the underscore-separated filename. Reimplement that
- * path here and convert I420/YUV420p to aio-grab's internal BGR888 format.
- */
-#define HISI_410_CAPTURE_DIR "/home/capturevideo"
-#define HISI_410_CAPTURE_CTL "/proc/msp/win0100"
-
-static int hisi_410_parse_dims_from_name(const char *name, off_t fsize, int *w, int *h)
-{
-	unsigned nums[16];
-	int n = 0;
-	const char *p = name;
-
-	*w = 0;
-	*h = 0;
-
-	while (*p && n < (int)(sizeof(nums) / sizeof(nums[0]))) {
-		while (*p && !isdigit((unsigned char)*p))
-			p++;
-		if (!*p)
-			break;
-		nums[n++] = (unsigned)strtoul(p, (char **)&p, 10);
-	}
-
-	for (int i = 0; i + 1 < n; i++) {
-		unsigned cw = nums[i];
-		unsigned ch = nums[i + 1];
-		if (cw < 320 || ch < 200 || cw > 3840 || ch > 2160)
-			continue;
-		if ((cw & 1) || (ch & 1))
-			continue;
-		if (fsize > 0 && (off_t)((cw * ch * 3U) / 2U) > fsize)
-			continue;
-		*w = (int)cw;
-		*h = (int)ch;
-		return 0;
-	}
-
-	/* Fallback for dumps where the filename does not carry dimensions. */
-	static const struct { int w, h; } known[] = {
-		{3840, 2160}, {1920, 1080}, {1280, 720}, {720, 576}, {720, 480}, {640, 480}
-	};
-	for (unsigned i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
-		off_t need = (off_t)known[i].w * (off_t)known[i].h * 3 / 2;
-		if (need == fsize) {
-			*w = known[i].w;
-			*h = known[i].h;
-			return 0;
-		}
-	}
-
-	return -1;
-}
-
-static int hisi_410_find_capture_file(char *path, size_t path_len, int *w, int *h, off_t *need)
-{
-	DIR *dir;
-	struct dirent *de;
-	struct stat st;
-	char candidate[512];
-
-	if (!path || path_len == 0 || !w || !h || !need)
-		return -1;
-
-	path[0] = 0;
-	*w = 0;
-	*h = 0;
-	*need = 0;
-
-	dir = opendir(HISI_410_CAPTURE_DIR);
-	if (!dir)
-		return -1;
-
-	while ((de = readdir(dir)) != NULL) {
-		if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
-			continue;
-		snprintf(candidate, sizeof(candidate), "%s/%s", HISI_410_CAPTURE_DIR, de->d_name);
-		if (stat(candidate, &st) < 0 || !S_ISREG(st.st_mode))
-			continue;
-		if (hisi_410_parse_dims_from_name(de->d_name, st.st_size, w, h) < 0)
-			continue;
-		*need = (off_t)(*w) * (off_t)(*h) * 3 / 2;
-		if (*need <= 0 || st.st_size < *need)
-			continue;
-		snprintf(path, path_len, "%s", candidate);
-		closedir(dir);
-		return 0;
-	}
-
-	closedir(dir);
-	return -1;
-}
-
-static int hisi_410_read_file(const char *path, unsigned char *buf, size_t len)
-{
-	FILE *fp = fopen(path, "rb");
-	if (!fp)
-		return -1;
-	size_t got = fread(buf, 1, len, fp);
-	fclose(fp);
-	return got == len ? 0 : -1;
-}
-
-static void hisi_410_i420_to_bgr(const unsigned char *yuv, unsigned char *bgr, int w, int h)
-{
-	const size_t y_size = (size_t)w * (size_t)h;
-	const size_t c_size = y_size / 4U;
-	const unsigned char *y_plane = yuv;
-	const unsigned char *u_plane = yuv + y_size;
-	const unsigned char *v_plane = yuv + y_size + c_size;
-
-	for (int yy = 0; yy < h; yy++) {
-		for (int xx = 0; xx < w; xx++) {
-			int y = y_plane[(size_t)yy * (size_t)w + (size_t)xx];
-			int u = u_plane[(size_t)(yy / 2) * (size_t)(w / 2) + (size_t)(xx / 2)];
-			int v = v_plane[(size_t)(yy / 2) * (size_t)(w / 2) + (size_t)(xx / 2)];
-
-			y -= 16;
-			u -= 128;
-			v -= 128;
-
-			int r = CLAMP((298 * y + 409 * v + 128) >> 8);
-			int g = CLAMP((298 * y - 100 * u - 208 * v + 128) >> 8);
-			int b = CLAMP((298 * y + 516 * u + 128) >> 8);
-
-			size_t off = ((size_t)yy * (size_t)w + (size_t)xx) * 3U;
-			bgr[off + 0] = (unsigned char)b;
-			bgr[off + 1] = (unsigned char)g;
-			bgr[off + 2] = (unsigned char)r;
-		}
-	}
-}
-
-static int getvideo_hisi_3716mv410_procfs(unsigned char *video, int *xres, int *yres)
-{
-	char capfile[512];
-	int w = 0, h = 0;
-	off_t need = 0;
-	unsigned char *yuv = NULL;
-	FILE *ctl;
-	int ret = -1;
-
-	*xres = 0;
-	*yres = 0;
-	capfile[0] = 0;
-
-	if (access(HISI_410_CAPTURE_CTL, W_OK) != 0) {
-		if (!quiet)
-			fprintf(stderr, "getvideo_hisi_3716mv410: %s not writable: %s\n", HISI_410_CAPTURE_CTL, strerror(errno));
-		return -1;
-	}
-
-	system("rm -rf " HISI_410_CAPTURE_DIR);
-	if (mkdir(HISI_410_CAPTURE_DIR, 0755) < 0 && errno != EEXIST) {
-		fprintf(stderr, "getvideo_hisi_3716mv410: mkdir %s failed: %s\n", HISI_410_CAPTURE_DIR, strerror(errno));
-		return -1;
-	}
-
-	ctl = fopen(HISI_410_CAPTURE_CTL, "w");
-	if (!ctl) {
-		fprintf(stderr, "getvideo_hisi_3716mv410: open %s failed: %s\n", HISI_410_CAPTURE_CTL, strerror(errno));
-		return -1;
-	}
-	fprintf(ctl, "capture %s\n", HISI_410_CAPTURE_DIR);
-	fclose(ctl);
-
-	/* The procfs capture is synchronous on the old grab, but give the driver a
-	 * short window so slower storage/filesystems do not race our directory scan. */
-	for (int tries = 0; tries < 20; tries++) {
-		if (hisi_410_find_capture_file(capfile, sizeof(capfile), &w, &h, &need) == 0)
-			break;
-		usleep(50000);
-	}
-
-	if (!w || !h || need <= 0 || !capfile[0]) {
-		fprintf(stderr, "getvideo_hisi_3716mv410: no usable capture file in %s\n", HISI_410_CAPTURE_DIR);
-		goto out;
-	}
-
-	yuv = (unsigned char *)malloc((size_t)need);
-	if (!yuv) {
-		fprintf(stderr, "getvideo_hisi_3716mv410: malloc failed size=%ld\n", (long)need);
-		goto out;
-	}
-
-	if (hisi_410_read_file(capfile, yuv, (size_t)need) < 0) {
-		fprintf(stderr, "getvideo_hisi_3716mv410: read %s failed\n", capfile);
-		goto out;
-	}
-
-	hisi_410_i420_to_bgr(yuv, video, w, h);
-	*xres = w;
-	*yres = h;
-	ret = 0;
-
-out:
-	free(yuv);
-	system("rm -rf " HISI_410_CAPTURE_DIR);
-	return ret;
-}
-
-static void getvideo_hisi_3716vo(unsigned char *video, int *xres, int *yres)
-{
-	HI_S32 ret;
-	HI_S32 job = -1;
-	HI_HANDLE hWin = 0;
-	HI_U32 dstPhys = 0;
-	unsigned char *dstVirt = NULL;
-	int tde_opened = 0;
-	int captured = 0;
-	int out_w = 0, out_h = 0;
-	int i;
-
-	*xres = 0;
-	*yres = 0;
-
-	if (hisi_open_libs() < 0)
-		return;
-
-	PFN_HI_SYS_Init    pfnSysInit    = (PFN_HI_SYS_Init)dlsym(hisi_lib_common, "HI_SYS_Init");
-	PFN_HI_SYS_DeInit  pfnSysDeInit  = (PFN_HI_SYS_DeInit)dlsym(hisi_lib_common, "HI_SYS_DeInit");
-	PFN_HI_UNF_DISP_Init   pfnDispInit   = (PFN_HI_UNF_DISP_Init)dlsym(hisi_lib_msp, "HI_UNF_DISP_Init");
-	PFN_HI_UNF_DISP_DeInit pfnDispDeInit = (PFN_HI_UNF_DISP_DeInit)dlsym(hisi_lib_msp, "HI_UNF_DISP_DeInit");
-	PFN_HI_UNF_VO_Init     pfnVoInit     = (PFN_HI_UNF_VO_Init)dlsym(hisi_lib_msp, "HI_UNF_VO_Init");
-	PFN_HI_UNF_VO_DeInit   pfnVoDeInit   = (PFN_HI_UNF_VO_DeInit)dlsym(hisi_lib_msp, "HI_UNF_VO_DeInit");
-	PFN_HI_MPI_WIN_GetHandle pfnGetHandle = (PFN_HI_MPI_WIN_GetHandle)dlsym(hisi_lib_msp, "HI_MPI_WIN_GetHandle");
-	PFN_HI_UNF_VO_CapturePicture pfnCapture = (PFN_HI_UNF_VO_CapturePicture)dlsym(hisi_lib_msp, "HI_UNF_VO_CapturePicture");
-	PFN_HI_UNF_VO_CapturePictureRelease pfnRelease = (PFN_HI_UNF_VO_CapturePictureRelease)dlsym(hisi_lib_msp, "HI_UNF_VO_CapturePictureRelease");
-	PFN_HI_MMZ_New    pfnMMZNew    = (PFN_HI_MMZ_New)hisi_sym(hisi_lib_common, hisi_lib_msp, "HI_MMZ_New");
-	PFN_HI_MMZ_Delete pfnMMZDelete = (PFN_HI_MMZ_Delete)hisi_sym(hisi_lib_common, hisi_lib_msp, "HI_MMZ_Delete");
-	PFN_HI_MMZ_Map    pfnMMZMap    = (PFN_HI_MMZ_Map)hisi_sym(hisi_lib_common, hisi_lib_msp, "HI_MMZ_Map");
-	PFN_HI_MMZ_Unmap  pfnMMZUnmap  = (PFN_HI_MMZ_Unmap)hisi_sym(hisi_lib_common, hisi_lib_msp, "HI_MMZ_Unmap");
-	PFN_HI_TDE2_Open     pfnTdeOpen     = (PFN_HI_TDE2_Open)dlsym(hisi_lib_msp, "HI_TDE2_Open");
-	PFN_HI_TDE2_Close    pfnTdeClose    = (PFN_HI_TDE2_Close)dlsym(hisi_lib_msp, "HI_TDE2_Close");
-	PFN_HI_TDE2_BeginJob pfnTdeBeginJob = (PFN_HI_TDE2_BeginJob)dlsym(hisi_lib_msp, "HI_TDE2_BeginJob");
-	PFN_HI_TDE2_EndJob   pfnTdeEndJob   = (PFN_HI_TDE2_EndJob)dlsym(hisi_lib_msp, "HI_TDE2_EndJob");
-	PFN_HI_TDE2_MbBlit   pfnTdeMbBlit   = (PFN_HI_TDE2_MbBlit)dlsym(hisi_lib_msp, "HI_TDE2_MbBlit");
-
-	if (!pfnSysInit || !pfnDispInit || !pfnVoInit || !pfnGetHandle ||
-		!pfnCapture || !pfnRelease || !pfnMMZNew || !pfnMMZDelete ||
-		!pfnMMZMap || !pfnMMZUnmap || !pfnTdeOpen || !pfnTdeClose ||
-		!pfnTdeBeginJob || !pfnTdeEndJob || !pfnTdeMbBlit) {
-		fprintf(stderr, "getvideo_hisi_3716vo: dlsym failed for VO/TDE functions\n");
-		return;
-	}
-
-	ret = pfnSysInit();
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_SYS_Init failed: 0x%x\n", ret);
-		return;
-	}
-
-	ret = pfnDispInit();
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_UNF_DISP_Init failed: 0x%x\n", ret);
-		goto cleanup_sys;
-	}
-
-	ret = pfnVoInit(HI_UNF_VO_DEV_MODE_NORMAL);
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_UNF_VO_Init failed: 0x%x\n", ret);
-		goto cleanup_disp;
-	}
-
-	WIN_GET_HANDLE_S winInfo;
-	memset(&winInfo, 0, sizeof(winInfo));
-	winInfo.enDisp = HI_DRV_DISPLAY_1;
-	ret = pfnGetHandle(&winInfo);
-	if (ret != HI_SUCCESS || winInfo.u32WinNumber == 0 || !winInfo.ahWinHandle[0]) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_MPI_WIN_GetHandle failed: 0x%x winNumber=%u hWin0=0x%x\n",
-			ret, winInfo.u32WinNumber, winInfo.ahWinHandle[0]);
-		goto cleanup_vo;
-	}
-	hWin = winInfo.ahWinHandle[0];
-
-	HI_UNF_3716_CAPTURE_INFO_S *cap = (HI_UNF_3716_CAPTURE_INFO_S*)calloc(1, 4096);
-	if (!cap) {
-		fprintf(stderr, "getvideo_hisi_3716vo: calloc failed\n");
-		goto cleanup_vo;
-	}
-
-	ret = pfnCapture(hWin, cap);
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_UNF_VO_CapturePicture failed: 0x%x\n", ret);
-		free(cap);
-		goto cleanup_vo;
-	}
-	captured = 1;
-
-	/*
-	 * HI_UNF_VO_CapturePicture returns the public UNF layout used by the old
-	 * grab binary: Y=0x04, C=0x08, stride=0x10, size=0x34/0x38.
-	 * Some hooks see the internal MPI layout before the UNF wrapper copies it,
-	 * so keep a fallback for Y=0x0c, C=0x20, stride=0x18/0x30, size=0x11c.
-	 */
-	HI_U32 capYPhy    = cap->u32YPhyAddr;
-	HI_U32 capCPhy    = cap->u32CPhyAddr;
-	HI_U32 capYStride = cap->u32YStride;
-	HI_U32 capCStride = cap->u32CStride ? cap->u32CStride : cap->u32YStride;
-	HI_U32 capW       = cap->u32Width;
-	HI_U32 capH       = cap->u32Height;
-
-	if (!capYPhy || !capCPhy || !capYStride || !capW || !capH || capW > 3840 || capH > 2160) {
-		HI_U32 *raw = (HI_U32*)cap;
-		HI_U32 w2 = raw[0x11c / 4];
-		HI_U32 h2 = raw[0x120 / 4];
-		if (!w2 || !h2 || w2 > 3840 || h2 > 2160) {
-			w2 = raw[0x1a0 / 4];
-			h2 = raw[0x1a4 / 4];
-		}
-		if (raw[0x00c / 4] && raw[0x020 / 4] && raw[0x018 / 4] &&
-			w2 && h2 && w2 <= 3840 && h2 <= 2160) {
-			capYPhy    = raw[0x00c / 4];
-			capCPhy    = raw[0x020 / 4];
-			capYStride = raw[0x018 / 4];
-			capCStride = raw[0x030 / 4] ? raw[0x030 / 4] : raw[0x018 / 4];
-			capW       = w2;
-			capH       = h2;
-		}
-	}
-
-	if (!capYPhy || !capCPhy || !capYStride || !capW || !capH || capW > 3840 || capH > 2160) {
-		fprintf(stderr, "getvideo_hisi_3716vo: invalid capture info y=0x%x c=0x%x stride=%u/%u size=%ux%u\n",
-			capYPhy, capCPhy, capYStride, capCStride, capW, capH);
-		goto cleanup_capture;
-	}
-
-	if (hisi_get_fb_size(&out_w, &out_h) < 0 || out_w <= 0 || out_h <= 0) {
-		out_w = (int)capW;
-		out_h = (int)capH;
-	}
-
-	if (out_w <= 0 || out_h <= 0 || out_w > 1920 || out_h > 1080) {
-		fprintf(stderr, "getvideo_hisi_3716vo: refusing invalid output size %dx%d\n", out_w, out_h);
-		goto cleanup_capture;
-	}
-
-	int dstStride = out_w * 3;
-	HI_U32 dstSize = (HI_U32)(dstStride * out_h);
-	dstPhys = pfnMMZNew(dstSize, 0x40, NULL, "aio_grab_3716_rgb");
-	if (!dstPhys) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_MMZ_New failed size=0x%x\n", dstSize);
-		goto cleanup_capture;
-	}
-
-	HI_TDE2_MB_S mb;
-	HI_TDE2_RECT_S mbRect;
-	HI_TDE2_SURFACE_S dst;
-	HI_TDE2_RECT_S dstRect;
-	HI_TDE2_MBOPT_S opt;
-	memset(&mb, 0, sizeof(mb));
-	memset(&mbRect, 0, sizeof(mbRect));
-	memset(&dst, 0, sizeof(dst));
-	memset(&dstRect, 0, sizeof(dstRect));
-	memset(&opt, 0, sizeof(opt));
-
-	mb.enColorFmt     = HISI_TDE_COLOR_FMT_YCBCR420MBP;
-	mb.u32YPhyAddr    = capYPhy;
-	mb.u32Width       = capW;
-	mb.u32Height      = capH;
-	mb.u32YStride     = capYStride;
-	mb.u32CbCrPhyAddr = capCPhy;
-	mb.u32CbCrStride  = capCStride ? capCStride : capYStride;
-
-	mbRect.s32Xpos    = 0;
-	mbRect.s32Ypos    = 0;
-	mbRect.u32Width   = capW;
-	mbRect.u32Height  = capH;
-
-	dst.u32PhyAddr    = dstPhys;
-	dst.enColorFmt    = HISI_TDE_COLOR_FMT_BGR888;
-	dst.u32Height     = (HI_U32)out_h;
-	dst.u32Width      = (HI_U32)out_w;
-	dst.u32Stride     = (HI_U32)dstStride;
-	dst.bAlphaMax255  = 1;
-	dst.bAlphaExt1555 = 1;
-	dst.bYCbCrClut    = 0;
-	dst.u8Alpha0      = 0xff;
-
-	dstRect.s32Xpos   = 0;
-	dstRect.s32Ypos   = 0;
-	dstRect.u32Width  = (HI_U32)out_w;
-	dstRect.u32Height = (HI_U32)out_h;
-
-	opt.u32Word[5] = 1;
-	opt.u32Word[6] = 3;
-
-	ret = pfnTdeOpen();
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_TDE2_Open failed: 0x%x\n", ret);
-		goto cleanup_capture;
-	}
-	tde_opened = 1;
-
-	job = pfnTdeBeginJob();
-	if (job < 0) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_TDE2_BeginJob failed: 0x%x\n", job);
-		goto cleanup_capture;
-	}
-
-	ret = pfnTdeMbBlit(job, &mb, &mbRect, &dst, &dstRect, &opt);
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_TDE2_MbBlit failed: 0x%x\n", ret);
-		goto cleanup_capture;
-	}
-
-	ret = pfnTdeEndJob(job, 1, 1, 1000);
-	job = -1;
-	if (ret != HI_SUCCESS) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_TDE2_EndJob failed: 0x%x\n", ret);
-		goto cleanup_capture;
-	}
-
-	dstVirt = (unsigned char*)pfnMMZMap(dstPhys, 0);
-	if (!dstVirt) {
-		fprintf(stderr, "getvideo_hisi_3716vo: HI_MMZ_Map dst failed\n");
-		goto cleanup_capture;
-	}
-
-	/* TDE destination is BGR888; aio-grab's JPEG path expects RGB order here. */
-	for (i = 0; i < out_w * out_h; i++) {
-		video[i * 3 + 0] = dstVirt[i * 3 + 2];
-		video[i * 3 + 1] = dstVirt[i * 3 + 1];
-		video[i * 3 + 2] = dstVirt[i * 3 + 0];
-	}
-
-	*xres = out_w;
-	*yres = out_h;
-
-cleanup_capture:
-	if (dstVirt)
-		pfnMMZUnmap(dstPhys);
-	if (tde_opened)
-		pfnTdeClose();
-	if (captured)
-		pfnRelease(hWin, cap);
-	if (dstPhys)
-		pfnMMZDelete(dstPhys);
-	free(cap);
-
-cleanup_vo:
-	if (pfnVoDeInit)
-		pfnVoDeInit();
-cleanup_disp:
-	if (pfnDispDeInit)
-		pfnDispDeInit();
-cleanup_sys:
-	if (pfnSysDeInit)
-		pfnSysDeInit();
-}
-
-void getvideo_hisi(unsigned char *video, int *xres, int *yres)
-{
-	switch (stb_type) {
-	case HISI_3716MV410:
-		if (getvideo_hisi_3716mv410_procfs(video, xres, yres) == 0)
-			return;
-		if (!quiet)
-			fprintf(stderr, "getvideo_hisi: 3716mv410 procfs capture failed, trying DISP snapshot fallback\n");
-		getvideo_hisi_snapshot(video, xres, yres);
-		return;
-
-	case HISI_3716MV430:
-		getvideo_hisi_3716vo(video, xres, yres);
-		return;
-
-	case HISI_3798MV200:
-	case HISI_3798MV300:
-		if (hisi_grab_request_video_only) {
-			if (!quiet)
-				fprintf(stderr, "HiSi 3798: using VO CapturePicture for real video-only\n");
-			getvideo_hisi_3716vo(video, xres, yres);
-			if (*xres > 0 && *yres > 0)
-				return;
-			if (!quiet)
-				fprintf(stderr, "HiSi 3798: VO CapturePicture failed, falling back to DISP snapshot; result may contain OSD\n");
-		}
-		getvideo_hisi_snapshot(video, xres, yres);
-		return;
-
-	case HISI_3798CV200:
-		getvideo_hisi_snapshot(video, xres, yres);
-		return;
-
-	default:
-		*xres = 0;
-		*yres = 0;
-		if (!quiet)
-			fprintf(stderr, "getvideo_hisi: unsupported HiSilicon stb_type=%d\n", stb_type);
-		return;
-	}
-}
-
 // grabing the video picture
 
 void getvideo2(unsigned char *video, int *xres, int *yres)
@@ -3675,6 +2615,7 @@ void getvideo2(unsigned char *video, int *xres, int *yres)
 		return;
 	}
 	ssize_t r = read(fd_video, video, 1920 * 1080 * 3);
+	(void)r;
 	close(fd_video);
 	*xres = 1920;
 	*yres = 1080;
@@ -3718,7 +2659,9 @@ void getvideo(unsigned char *video, int *xres, int *yres)
  * "item << 24" doesn't result in sign extension if item has the top-bit
  * set and we are using the 64-bit file-system API.
  */
-		if (stb_type == BRCM73565 || stb_type == BRCM73625 || stb_type == BRCM7439DAGS || stb_type == BRCM7439 || stb_type == BRCM75845 || stb_type == BRCM72604) {
+		if (stb_type == BRCM73565 || stb_type == BRCM73625 || stb_type == BRCM7439DAGS ||
+		    stb_type == BRCM7439 || stb_type == BRCM7252S ||
+		    stb_type == BRCM75845 || stb_type == BRCM72604) {
 			chr_luma_register_offset = 0x3c;
 
 			ofs = data[chr_luma_register_offset + 24] << 4; /* luma lines */
@@ -3836,17 +2779,29 @@ void getvideo(unsigned char *video, int *xres, int *yres)
 
 		t=t2=dat1=0;
 
-		xsub=chr_luma_stride;
-		// decode luma & chroma plane or lets say sort it
+		/*
+		 * Single combined luma+chroma unpack loop.
+		 *
+		 * On DM920 (BCM7252S) and DM900 (BCM7439), the decoder memory layout
+		 * requires luma and chroma to be de-tiled in lockstep: t (luma) and
+		 * t2 (chroma) advance together for the first ofs2 rows of each column
+		 * block.  The previous code split this into two separate loops, which
+		 * produced horizontal chroma stripes on DM920.  This is the same
+		 * structure used by the older working OpenDMM-derived grabber.
+		 */
 		for (xtmp=0; xtmp < stride; xtmp += chr_luma_stride)
 		{
 			if ((stride-xtmp) <= chr_luma_stride)
 				xsub=stride-xtmp;
+			else
+				xsub=chr_luma_stride;
 
 			dat1=xtmp;
+
 			for (ytmp = 0; ytmp < ofs; ytmp++)
 			{
-				if (stb_type == BRCM7439)
+				/* ---------------- luma ---------------- */
+				if (stb_type == BRCM7439 || stb_type == BRCM7252S)
 				{
 					if (t & 0x100)
 					{
@@ -3966,142 +2921,140 @@ void getvideo(unsigned char *video, int *xres, int *yres)
 				{
 					memcpy(luma+dat1,memory_tmp+pageoffset+t,xsub); // luma
 				}
-				dat1+=stride;
-				t+=chr_luma_stride;
-			}
-		}
-		// Hmm apparently lumastride == chromastride?
-		xsub=chr_luma_stride;
-		for (xtmp=0; xtmp < stride; xtmp += chr_luma_stride)
-		{
-			if ((stride-xtmp) <= chr_luma_stride)
-				xsub=stride-xtmp;
 
-			dat1=xtmp;
-			for (ytmp = 0; ytmp < ofs2; ytmp++)
-			{
-				if (stb_type == BRCM7439)
+				/* ---------------- chroma ---------------- *
+				 * Chroma rows exist only for the first ofs2 rows of each
+				 * column block.  t2 tracks luma t only while that condition
+				 * holds — this is the interleaved behaviour that the DM920
+				 * decoder requires. */
+				if ((int)(ofs2 - ytmp) > 0)
 				{
-					if (t2 & 0x100)
+					if (stb_type == BRCM7439 || stb_type == BRCM7252S)
 					{
-						int cp = xsub % 0x20 ?: 0x20;
-						switch (xsub)
+						if (t2 & 0x100)
 						{
-							case 0x61 ... 0x80:
-								memcpy(chroma + dat1 + 0x60,memory_tmp+pageoffset+offset + t2 + 0x40, cp);
-								cp = 0x20;
-							case 0x41 ... 0x60:
-								memcpy(chroma + dat1 + 0x40, memory_tmp+pageoffset+offset + t2 + 0x60, cp);
-								cp = 0x20;
-							case 0x21 ... 0x40:
-								memcpy(chroma + dat1 + 0x20, memory_tmp+pageoffset+offset + t2 + 0x00, cp);
-								cp = 0x20;
-							default:
-								memcpy(chroma + dat1 + 0x00, memory_tmp+pageoffset+offset + t2 + 0x20, cp);
+							int cp = xsub % 0x20 ?: 0x20;
+							switch (xsub)
+							{
+								case 0x61 ... 0x80:
+									memcpy(chroma + dat1 + 0x60,memory_tmp+pageoffset+offset + t2 + 0x40, cp);
+									cp = 0x20;
+								case 0x41 ... 0x60:
+									memcpy(chroma + dat1 + 0x40, memory_tmp+pageoffset+offset + t2 + 0x60, cp);
+									cp = 0x20;
+								case 0x21 ... 0x40:
+									memcpy(chroma + dat1 + 0x20, memory_tmp+pageoffset+offset + t2 + 0x00, cp);
+									cp = 0x20;
+								default:
+									memcpy(chroma + dat1 + 0x00, memory_tmp+pageoffset+offset + t2 + 0x20, cp);
+							}
 						}
+						else
+						{
+							memcpy(chroma+dat1,memory_tmp+pageoffset+offset+t2,xsub); // chroma
+						}
+					}
+					else if (stb_type == BRCM7439DAGS)
+					{
+						if (t2 & 0x200)
+						{
+							int cp = xsub % 0x20 ?: 0x20;
+							switch (xsub)
+							{
+								case 0xe1 ... 0x100:
+									memcpy(chroma + dat1 + 0xe0,memory_tmp+pageoffset+offset + t2 + 0xc0, cp);
+									cp = 0x20;
+								case 0xc1 ... 0xe0:
+									memcpy(chroma + dat1 + 0xc0,memory_tmp+pageoffset+offset + t2 + 0xe0, cp);
+									cp = 0x20;
+								case 0xa1 ... 0xc0:
+									memcpy(chroma + dat1 + 0xa0,memory_tmp+pageoffset+offset + t2 + 0x80, cp);
+									cp = 0x20;
+								case 0x81 ... 0xa0:
+									memcpy(chroma + dat1 + 0x80,memory_tmp+pageoffset+offset + t2 + 0xa0, cp);
+									cp = 0x20;
+								case 0x61 ... 0x80:
+									memcpy(chroma + dat1 + 0x60,memory_tmp+pageoffset+offset + t2 + 0x40, cp);
+									cp = 0x20;
+								case 0x41 ... 0x60:
+									memcpy(chroma + dat1 + 0x40, memory_tmp+pageoffset+offset + t2 + 0x60, cp);
+									cp = 0x20;
+								case 0x21 ... 0x40:
+									memcpy(chroma + dat1 + 0x20, memory_tmp+pageoffset+offset + t2 + 0x00, cp);
+									cp = 0x20;
+								default:
+									memcpy(chroma + dat1 + 0x00, memory_tmp+pageoffset+offset + t2 + 0x20, cp);
+							}
+						}
+						else
+						{
+							memcpy(chroma+dat1,memory_tmp+pageoffset+offset+t2,xsub); // chroma
+						}
+					}
+					else if (stb_type == BRCM72604)
+					{
+						if (t2 & 0x200)
+						{
+							int cp = xsub % 0x20 ?: 0x20;
+							switch (xsub)
+							{
+								case 0xe1 ... 0x100:
+									memcpy(chroma + dat1 + 0xe0,memory_tmp+pageoffset+offset + t2 + 0xc0, cp);
+									cp = 0x20;
+								case 0xc1 ... 0xe0:
+									memcpy(chroma + dat1 + 0xc0,memory_tmp+pageoffset+offset + t2 + 0xe0, cp);
+									cp = 0x20;
+								case 0xa1 ... 0xc0:
+									memcpy(chroma + dat1 + 0xa0,memory_tmp+pageoffset+offset + t2 + 0x80, cp);
+									cp = 0x20;
+								case 0x81 ... 0xa0:
+									memcpy(chroma + dat1 + 0x80,memory_tmp+pageoffset+offset + t2 + 0xa0, cp);
+									cp = 0x20;
+
+								case 0x61 ... 0x80:
+									memcpy(chroma + dat1 + 0x60,memory_tmp+pageoffset+offset + t2 + 0x40, cp);
+									cp = 0x20;
+								case 0x41 ... 0x60:
+									memcpy(chroma + dat1 + 0x40,memory_tmp+pageoffset+offset + t2 + 0x60, cp);
+									cp = 0x20;
+								case 0x21 ... 0x40:
+									memcpy(chroma + dat1 + 0x20,memory_tmp+pageoffset+offset + t2 + 0x00, cp);
+									cp = 0x20;
+								default:
+									memcpy(chroma + dat1 + 0x00,memory_tmp+pageoffset+offset + t2 + 0x20, cp);
+							}
+						}
+						else
+						{
+							memcpy(chroma+dat1,memory_tmp+pageoffset+offset+t2,xsub); // chroma
+						}
+
+						int ii;
+						unsigned char chroma_tmp[0x100];
+
+						for (ii = 0; ii < 0x100; ii+= 0x20) {
+							memcpy(&chroma_tmp[ii + 0x00], chroma + dat1 + (ii + 0x1c), 0x4);
+							memcpy(&chroma_tmp[ii + 0x04], chroma + dat1 + (ii + 0x18), 0x4);
+							memcpy(&chroma_tmp[ii + 0x08], chroma + dat1 + (ii + 0x14), 0x4);
+							memcpy(&chroma_tmp[ii + 0x0c], chroma + dat1 + (ii + 0x10), 0x4);
+							memcpy(&chroma_tmp[ii + 0x10], chroma + dat1 + (ii + 0x0c), 0x4);
+							memcpy(&chroma_tmp[ii + 0x14], chroma + dat1 + (ii + 0x08), 0x4);
+							memcpy(&chroma_tmp[ii + 0x18], chroma + dat1 + (ii + 0x04), 0x4);
+							memcpy(&chroma_tmp[ii + 0x1c], chroma + dat1 + (ii + 0x00), 0x4);
+						}
+
+						memcpy(chroma + dat1, chroma_tmp, xsub);
 					}
 					else
 					{
 						memcpy(chroma+dat1,memory_tmp+pageoffset+offset+t2,xsub); // chroma
 					}
-				}
-				if (stb_type == BRCM7439DAGS)
-				{
-					if (t2 & 0x200)
-					{
-						int cp = xsub % 0x20 ?: 0x20;
-						switch (xsub)
-						{
-							case 0xe1 ... 0x100:
-								memcpy(chroma + dat1 + 0xe0,memory_tmp+pageoffset+offset + t2 + 0xc0, cp);
-								cp = 0x20;
-							case 0xc1 ... 0xe0:
-								memcpy(chroma + dat1 + 0xc0,memory_tmp+pageoffset+offset + t2 + 0xe0, cp);
-								cp = 0x20;
-							case 0xa1 ... 0xc0:
-								memcpy(chroma + dat1 + 0xa0,memory_tmp+pageoffset+offset + t2 + 0x80, cp);
-								cp = 0x20;
-							case 0x81 ... 0xa0:
-								memcpy(chroma + dat1 + 0x80,memory_tmp+pageoffset+offset + t2 + 0xa0, cp);
-								cp = 0x20;
-							case 0x61 ... 0x80:
-								memcpy(chroma + dat1 + 0x60,memory_tmp+pageoffset+offset + t2 + 0x40, cp);
-								cp = 0x20;
-							case 0x41 ... 0x60:
-								memcpy(chroma + dat1 + 0x40, memory_tmp+pageoffset+offset + t2 + 0x60, cp);
-								cp = 0x20;
-							case 0x21 ... 0x40:
-								memcpy(chroma + dat1 + 0x20, memory_tmp+pageoffset+offset + t2 + 0x00, cp);
-								cp = 0x20;
-							default:
-								memcpy(chroma + dat1 + 0x00, memory_tmp+pageoffset+offset + t2 + 0x20, cp);
-						}
-					}
-					else
-					{
-						memcpy(chroma+dat1,memory_tmp+pageoffset+offset+t2,xsub); // chroma
-					}
-				}
-				else if (stb_type == BRCM72604)
-				{
-					if (t2 & 0x200)
-					{
-						int cp = xsub % 0x20 ?: 0x20;
-						switch (xsub)
-						{
-							case 0xe1 ... 0x100:
-								memcpy(chroma + dat1 + 0xe0,memory_tmp+pageoffset+offset + t2 + 0xc0, cp);
-								cp = 0x20;
-							case 0xc1 ... 0xe0:
-								memcpy(chroma + dat1 + 0xc0,memory_tmp+pageoffset+offset + t2 + 0xe0, cp);
-								cp = 0x20;
-							case 0xa1 ... 0xc0:
-								memcpy(chroma + dat1 + 0xa0,memory_tmp+pageoffset+offset + t2 + 0x80, cp);
-								cp = 0x20;
-							case 0x81 ... 0xa0:
-								memcpy(chroma + dat1 + 0x80,memory_tmp+pageoffset+offset + t2 + 0xa0, cp);
-								cp = 0x20;
 
-							case 0x61 ... 0x80:
-								memcpy(chroma + dat1 + 0x60,memory_tmp+pageoffset+offset + t2 + 0x40, cp);
-								cp = 0x20;
-							case 0x41 ... 0x60:
-								memcpy(chroma + dat1 + 0x40,memory_tmp+pageoffset+offset + t2 + 0x60, cp);
-								cp = 0x20;
-							case 0x21 ... 0x40:
-								memcpy(chroma + dat1 + 0x20,memory_tmp+pageoffset+offset + t2 + 0x00, cp);
-								cp = 0x20;
-							default:
-								memcpy(chroma + dat1 + 0x00,memory_tmp+pageoffset+offset + t2 + 0x20, cp);
-						}
-					}
-					else
-					{
-						memcpy(chroma+dat1,memory_tmp+pageoffset+offset+t2,xsub); // chroma
-					}
-
-					int ii;
-					unsigned char chroma_tmp[0x100];
-
-					for (ii = 0; ii < 0x100; ii+= 0x20) {
-						memcpy(&chroma_tmp[ii + 0x00], chroma + dat1 + (ii + 0x1c), 0x4);
-						memcpy(&chroma_tmp[ii + 0x04], chroma + dat1 + (ii + 0x18), 0x4);
-						memcpy(&chroma_tmp[ii + 0x08], chroma + dat1 + (ii + 0x14), 0x4);
-						memcpy(&chroma_tmp[ii + 0x0c], chroma + dat1 + (ii + 0x10), 0x4);
-						memcpy(&chroma_tmp[ii + 0x10], chroma + dat1 + (ii + 0x0c), 0x4);
-						memcpy(&chroma_tmp[ii + 0x14], chroma + dat1 + (ii + 0x08), 0x4);
-						memcpy(&chroma_tmp[ii + 0x18], chroma + dat1 + (ii + 0x04), 0x4);
-						memcpy(&chroma_tmp[ii + 0x1c], chroma + dat1 + (ii + 0x00), 0x4);
-					}
-
-					memcpy(chroma + dat1, chroma_tmp, xsub);
+					t2 += chr_luma_stride;
 				}
-				else
-				{
-					memcpy(chroma+dat1,memory_tmp+pageoffset+offset+t2,xsub); // chroma
-				}
-				t2+=chr_luma_stride;
-				dat1+=stride;
+
+				t += chr_luma_stride;
+				dat1 += stride;
 			}
 		}
 		munmap(memory_tmp, memory_tmp_size);
@@ -4925,7 +3878,6 @@ dmerr:
 	free(luma);
 	free(chroma);
 }
-
 static const char e2egl_capture_magic[8] = {'E', '2', 'E', 'G', 'L', '0', '1', 0};
 
 struct e2egl_capture_header
@@ -5110,7 +4062,8 @@ void getosd(unsigned char *osd, int *xres, int *yres)
 	}
 
 	/*
-	 * Triple-buffered framebuffer fix (DM900/DM920, stb_type == BRCM7439):
+	 * Triple-buffered framebuffer fix (DM900/DM920, stb_type == BRCM7439
+	 * or BRCM7252S):
 	 * Enigma2 rotates OSD pages by panning to Y=0, Y=yres, Y=2*yres.  The
 	 * code below reads from offset 0 in lfb, but the currently-displayed
 	 * frame may be at a higher yoffset.  Fix: memmove the front-buffer page
@@ -5118,7 +4071,7 @@ void getosd(unsigned char *osd, int *xres, int *yres)
 	 * pointer to Y=0.  Grab then reads the correct frame and E2 will not
 	 * render into Y=0 while it is the hardware front buffer.
 	 */
-	if (stb_type == BRCM7439 &&
+	if ((stb_type == BRCM7439 || stb_type == BRCM7252S) &&
 	    var_screeninfo.yres_virtual > var_screeninfo.yres && var_screeninfo.yoffset != 0)
 	{
 		unsigned long src_off   = (unsigned long)var_screeninfo.yoffset * fix_screeninfo.line_length;
@@ -5281,8 +4234,33 @@ void getosd(unsigned char *osd, int *xres, int *yres)
 	if (!quiet)
 		fprintf(stderr, "... Framebuffer-Size: %d x %d\n",*xres,*yres);
 }
-
 // bicubic pixmap resizing
+
+/* ---- HiSilicon backend stubs ----
+ *
+ * This fork targets Dreambox DM920 (BCM7252S) only.
+ * The real HiSilicon backends live in oe-alliance and are only needed
+ * on HiSilicon-based receivers.  On a DM920 none of the HiSilicon code
+ * paths are ever executed, so empty stubs are sufficient to satisfy the
+ * linker without dragging in the entire HiSilicon implementation.
+ */
+
+static int hisi_uses_chip_backend(void)
+{
+	return 0;
+}
+
+static int hisi_uses_composited_snapshot(void)
+{
+	return 0;
+}
+
+void getvideo_hisi(unsigned char *video, int *xres, int *yres)
+{
+	(void)video;
+	*xres = 0;
+	*yres = 0;
+}
 
 void smooth_resize(const unsigned char *source, unsigned char *dest, int xsource, int ysource, int xdest, int ydest, int colors)
 {
