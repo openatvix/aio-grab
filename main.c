@@ -1155,33 +1155,32 @@ static int grab_ffmpeg_backend_should_autouse(int *src_w, int *src_h)
 {
 	int w = 0, h = 0;
 	int hevc;
-	int iptv;
 	int dmnew_sd576;
 	grab_read_current_video_size(&w, &h);
 	hevc = grab_current_video_is_hevc();
-	iptv = grab_current_service_is_iptv();
 	dmnew_sd576 = grab_current_video_is_dmnew_sd576(w, h);
 	if (src_w) *src_w = w;
 	if (src_h) *src_h = h;
 
-	/* Scope deliberately limited to Dream receivers for now.  Other 4K STBs
-	 * keep their existing grab backend until they are tested separately.
-	 * On Dream boxes route both UHD and HEVC/H.265 through ffmpeg: some HD
-	 * 1920x1080 services are HEVC and fail through the raw grab paths too.
-	 * On DreamOne/DreamTwo also route PAL SD 720x576-like services through
-	 * ffmpeg, because the native /dev/videograbber path can return corrupted
-	 * SD frames there as well.
-	 * On DM900/DM920 (BRCM7439/BRCM7252S) also route IPTV service references
-	 * through ffmpeg.  Some IPTV services do not expose enough reliable
-	 * decoder metadata early enough for the raw BRCM7439 path decision,
-	 * while the direct stream URL can be decoded cleanly by ffmpeg.
+	/*
+	 * FFmpeg backend is ONLY used for streams the native hardware decoder
+	 * memory grab path cannot handle safely:
 	 *
-	 * Now also detects IPTV by service type (0x1000/0x5001/0x5002/0x4097)
-	 * so that IPTV streams without an embedded URL marker in the OpenWebif
-	 * response still route through ffmpeg instead of the raw decoder path. */
+	 *   - 4K / UHD resolutions (> 1920x1080)
+	 *   - HEVC / H.265 codec (any resolution)
+	 *   - DreamOne/DreamTwo PAL SD 720x576-like services where the native
+	 *     /dev/videograbber path returns corrupted SD frames
+	 *
+	 * Everything else — including FHD/HD/SD IPTV streams on DM900/DM920 —
+	 * uses the normal native grabber (getvideo / getvideo2), which works
+	 * correctly for H.264 IPTV at 1920x1080 and below.
+	 *
+	 * This avoids routing ordinary FHD IPTV through ffmpeg, which would
+	 * require a TLS-capable ffmpeg build (the DM920's /usr/bin/ffmpeg has
+	 * no https support) and is unnecessary for H.264 IPTV streams.
+	 */
 	if ((stb_type == BRCM7439 || stb_type == BRCM7252S || stb_type == DMNEW) &&
-	    (w > 1920 || h > 1080 || hevc || dmnew_sd576 ||
-	     ((stb_type == BRCM7439 || stb_type == BRCM7252S) && iptv)))
+	    (w > 1920 || h > 1080 || hevc || dmnew_sd576))
 		return 1;
 
 	return 0;
