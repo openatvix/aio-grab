@@ -754,14 +754,45 @@ static int grab_get_current_stream_input(char *out, size_t out_len, const char *
 {
 	char body[8192];
 	char sref[2048];
+	char input_file[2048];
 
 	if (override && *override)
 		return grab_normalize_stream_input(override, out, out_len);
 
-	/* OpenWebif/WebInterface normally provides the currently playing service here. */
+	/* Primary: OpenWebif/WebInterface provides the currently playing service here. */
 	if (grab_http_get_local80("/web/getcurrent", body, sizeof(body)) == 0 &&
 	    grab_extract_xml_tag(body, "e2servicereference", sref, sizeof(sref)) == 0)
-		return grab_normalize_stream_input(sref, out, out_len);
+	{
+		if (grab_normalize_stream_input(sref, out, out_len) == 0)
+			return 0;
+	}
+
+	/* Fallback: /proc/stb/vmpeg/0/input
+	 *
+	 * The old working binary used this when OpenWebif was unavailable or
+	 * returned a service reference that could not be parsed into a usable
+	 * stream URL.  This is the critical fallback for IPTV service refs that
+	 * do not round-trip cleanly through the OpenWebif XML path.
+	 *
+	 * Typical content on IPTV services looks like:
+	 *   1:0:1:...:http%3a//host%3a8080/path:Service Name
+	 * or a plain service reference that the local streamer at
+	 * http://127.0.0.1:8001/ can resolve.
+	 */
+	if (grab_read_text_file("/proc/stb/vmpeg/0/input", input_file, sizeof(input_file)) == 0)
+	{
+		if (grab_normalize_stream_input(input_file, out, out_len) == 0)
+			return 0;
+
+		/* If normalize failed but it looks like an Enigma2 service ref,
+		 * hand it to the local streamer at port 8001. */
+		if (strncmp(input_file, "1:", 2) == 0)
+		{
+			grab_percent_decode_inplace(input_file);
+			snprintf(out, out_len, "http://127.0.0.1:8001/%s", input_file);
+			return 0;
+		}
+	}
 
 	return -1;
 }
@@ -994,6 +1025,52 @@ static int grab_current_service_type_is_hevc(void)
 	return 0;
 }
 
+/* New helper: detect IPTV service type (0x1000, 0x5001, 0x5002, 0x4097).
+ * Used by grab_current_service_is_iptv() and by the ffmpeg auto-use path. */
+static int grab_current_service_type_is_iptv(void)
+{
+	char body[8192];
+	char sref[2048];
+	const char *p;
+	const char *q;
+	int idx = 0;
+
+	if (grab_http_get_local80("/web/getcurrent", body, sizeof(body)) == 0 &&
+	    grab_extract_xml_tag(body, "e2servicereference", sref, sizeof(sref)) == 0)
+	{
+		for (p = sref; p && *p; p = q ? q + 1 : NULL, idx++)
+		{
+			q = strchr(p, ':');
+			if (idx == 2)
+			{
+				if (strncmp(p, "1000:", 5) == 0 ||
+				    strncmp(p, "5001:", 5) == 0 ||
+				    strncmp(p, "5002:", 5) == 0 ||
+				    strncmp(p, "4097:", 5) == 0)
+					return 1;
+				return 0;
+			}
+			if (!q)
+				break;
+		}
+	}
+
+	/* Fallback: check /proc/stb/vmpeg/0/input */
+	{
+		char input_file[2048];
+		if (grab_read_text_file("/proc/stb/vmpeg/0/input", input_file, sizeof(input_file)) == 0)
+		{
+			if (strncmp(input_file, "1000:", 5) == 0 ||
+			    strncmp(input_file, "5001:", 5) == 0 ||
+			    strncmp(input_file, "5002:", 5) == 0 ||
+			    strncmp(input_file, "4097:", 5) == 0)
+				return 1;
+		}
+	}
+
+	return 0;
+}
+
 static int grab_current_video_is_hevc(void)
 {
 	return grab_current_codec_is_hevc() || grab_current_service_type_is_hevc();
@@ -1004,21 +1081,64 @@ static int grab_current_service_is_iptv(void)
 	char body[8192];
 	char sref[2048];
 	char work[4096];
+	char input_file[2048];
 
-	if (grab_http_get_local80("/web/getcurrent", body, sizeof(body)) < 0 ||
-	    grab_extract_xml_tag(body, "e2servicereference", sref, sizeof(sref)) < 0)
+	if (grab_http_get_local80("/web/getcurrent", body, sizeof(body)) == 0 &&
+	    grab_extract_xml_tag(body, "e2servicereference", sref, sizeof(sref)) == 0)
+	{
+		/* IPTV service references usually embed the real stream URL as one field.
+		 * It may be percent-encoded more than once, e.g. http%253a//... .
+		 * Detect that without normalizing the global ffmpeg input options here;
+		 * the real extraction and header parsing still happens later in
+		 * grab_get_current_stream_input(). */
+		snprintf(work, sizeof(work), "%s", sref);
+		grab_xml_unescape_inplace(work);
+		grab_percent_decode_repeat_inplace(work, 4);
+
+		if (grab_find_earliest_url_marker(work, NULL) != NULL)
+			return 1;
+
+		/* Also treat known IPTV service types as IPTV even if no URL
+		 * marker was found in the reference. */
+		{
+			const char *p = sref;
+			const char *q;
+			int idx = 0;
+			for (; p && *p; p = q ? q + 1 : NULL, idx++)
+			{
+				q = strchr(p, ':');
+				if (idx == 2)
+				{
+					if (strncmp(p, "1000:", 5) == 0 ||
+					    strncmp(p, "5001:", 5) == 0 ||
+					    strncmp(p, "5002:", 5) == 0 ||
+					    strncmp(p, "4097:", 5) == 0)
+						return 1;
+					break;
+				}
+				if (!q)
+					break;
+			}
+		}
 		return 0;
+	}
 
-	/* IPTV service references usually embed the real stream URL as one field.
-	 * It may be percent-encoded more than once, e.g. http%253a//... .
-	 * Detect that without normalizing the global ffmpeg input options here;
-	 * the real extraction and header parsing still happens later in
-	 * grab_get_current_stream_input(). */
-	snprintf(work, sizeof(work), "%s", sref);
-	grab_xml_unescape_inplace(work);
-	grab_percent_decode_repeat_inplace(work, 4);
+	/* OpenWebif unreachable — check the raw input file as a second source.
+	 * If it contains a URL marker or an IPTV service type, treat as IPTV. */
+	if (grab_read_text_file("/proc/stb/vmpeg/0/input", input_file, sizeof(input_file)) == 0)
+	{
+		snprintf(work, sizeof(work), "%s", input_file);
+		grab_xml_unescape_inplace(work);
+		grab_percent_decode_repeat_inplace(work, 4);
+		if (grab_find_earliest_url_marker(work, NULL) != NULL)
+			return 1;
+	}
 
-	return grab_find_earliest_url_marker(work, NULL) != NULL;
+	/* Cannot determine — be conservative and treat as IPTV so the safer
+	 * key-frame-wait path is used instead of the fast path.  This matches
+	 * the behaviour of the old working binary, which always took the slow
+	 * path when the service type could not be established. */
+	return 1;
 }
 
 static int grab_current_video_is_dmnew_sd576(int w, int h)
@@ -1054,7 +1174,11 @@ static int grab_ffmpeg_backend_should_autouse(int *src_w, int *src_h)
 	 * On DM900/DM920 (BRCM7439/BRCM7252S) also route IPTV service references
 	 * through ffmpeg.  Some IPTV services do not expose enough reliable
 	 * decoder metadata early enough for the raw BRCM7439 path decision,
-	 * while the direct stream URL can be decoded cleanly by ffmpeg. */
+	 * while the direct stream URL can be decoded cleanly by ffmpeg.
+	 *
+	 * Now also detects IPTV by service type (0x1000/0x5001/0x5002/0x4097)
+	 * so that IPTV streams without an embedded URL marker in the OpenWebif
+	 * response still route through ffmpeg instead of the raw decoder path. */
 	if ((stb_type == BRCM7439 || stb_type == BRCM7252S || stb_type == DMNEW) &&
 	    (w > 1920 || h > 1080 || hevc || dmnew_sd576 ||
 	     ((stb_type == BRCM7439 || stb_type == BRCM7252S) && iptv)))
