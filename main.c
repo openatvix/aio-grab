@@ -606,71 +606,116 @@ static void grab_parse_iptv_url_options_inplace(char *url)
 	}
 }
 
+/*
+ * IPTV service references embed the real stream URL as one colon-separated
+ * field, e.g.
+ *   4097:0:1:...:http%3a//host%3a80/play/live.php?mac=00%3a1A%3a79%3a6E%3aB7%3aAC&...:Service Name
+ *
+ * After percent-decoding, the URL contains MANY literal colons that are NOT
+ * field separators:
+ *   - "http://"          scheme
+ *   - "host:80"          port
+ *   - "mac=00:1A:79:..." MAC address (very common in IPTV URLs)
+ *   - "http://localhost/ch/..." nested URL in chCm parameter
+ *   - "[::1]"            IPv6 literal
+ *
+ * The only colon that IS a separator is the last one, followed by the human
+ * readable service name (":TRT 4K").  We therefore keep the URL intact and
+ * only strip the trailing service-name suffix when the tail after the last
+ * colon looks like a name (no '/', '?', '&', '#', and reasonably short).
+ */
+static void grab_cut_service_name_suffix_inplace(char *url)
+{
+	char *p;
+	char *last_colon = NULL;
+
+	if (!url)
+		return;
+
+	for (p = url; *p; ++p)
+	{
+		if (*p != ':')
+			continue;
+
+		/* Skip "://" scheme separator */
+		if (p[1] == '/' && p[2] == '/')
+		{
+			p += 2;
+			continue;
+		}
+
+		/* Skip "host:port" when the port is digits and is followed by
+		 * '/', '?', '&', '#', or end-of-string. */
+		if (isdigit((unsigned char)p[1]))
+		{
+			char *q = p + 1;
+			while (isdigit((unsigned char)*q))
+				++q;
+			if (*q == '/' || *q == '?' || *q == '&' || *q == '#' || *q == 0)
+			{
+				p = q - 1;
+				continue;
+			}
+		}
+
+		/* Skip MAC-like "xx:xx:xx:xx:xx:xx" or any run of 2-hex-digit
+		 * groups separated by colons (>= 2 groups). */
+		{
+			char *q = p + 1;
+			int groups = 0;
+			while (isxdigit((unsigned char)q[0]) &&
+			       isxdigit((unsigned char)q[1]) &&
+			       q[2] == ':' &&
+			       isxdigit((unsigned char)q[3]) &&
+			       isxdigit((unsigned char)q[4]))
+			{
+				q += 3;
+				++groups;
+			}
+			if (groups >= 2)
+			{
+				p = q - 1;
+				continue;
+			}
+		}
+
+		/* Skip nested URL inside a query parameter, e.g.
+		 * "&chCm=http://localhost/ch/19921_" -- already handled by the
+		 * "://" rule above, but a decoded "http%3a//" one level up also
+		 * lands here and the "://" rule catches it. */
+
+		/* Skip IPv6 bracket group like "[::1]" */
+		if (p > url && p[-1] == ']')
+			continue;
+
+		last_colon = p;
+	}
+
+	if (!last_colon)
+		return;
+
+	/* Only treat the last colon as a separator if the tail after it does
+	 * not look like URL path/query and is non-empty. */
+	{
+		char *tail = last_colon + 1;
+		if (tail[0] &&
+		    !strchr(tail, '/') &&
+		    !strchr(tail, '?') &&
+		    !strchr(tail, '&') &&
+		    !strchr(tail, '#') &&
+		    strlen(tail) < 64)
+			*last_colon = 0;
+	}
+}
+
 static void grab_cut_encoded_url_field_inplace(char *url)
 {
-	/*
-	 * Enigma2 IPTV references usually store the stream URL as one colon field,
-	 * e.g. 4097:...:http%3a//host%3a8080/path:Service Name.
-	 * The scheme and URL-internal colons are percent encoded, so the first
-	 * literal colon after the marker terminates the URL field.
-	 */
-	while (url && *url)
-	{
-		if (*url == ':')
-		{
-			char *q = url + 1;
-			/* Be tolerant of references where only the scheme colon is encoded
-			 * but an URL port is left plain, e.g. http%3a//host:8080/path. */
-			if (isdigit((unsigned char)*q))
-			{
-				while (isdigit((unsigned char)*q))
-					++q;
-				if (*q == '/' || *q == '?' || *q == '&' || *q == '#' || *q == 0)
-				{
-					url = q;
-					continue;
-				}
-			}
-			*url = 0;
-			return;
-		}
-		++url;
-	}
+	grab_cut_service_name_suffix_inplace(url);
 }
 
 static void grab_cut_plain_embedded_url_inplace(char *url)
 {
-	char *p;
-
-	if (!url)
-		return;
-	p = strstr(url, "://");
-	if (!p)
-		return;
-	p += 3;
-
-	while (*p)
-	{
-		if (*p == ':')
-		{
-			char *q = p + 1;
-			/* Keep a normal URL port such as http://host:8080/path. */
-			if (isdigit((unsigned char)*q))
-			{
-				while (isdigit((unsigned char)*q))
-					++q;
-				if (*q == '/' || *q == '?' || *q == '&' || *q == '#' || *q == 0)
-				{
-					p = q;
-					continue;
-				}
-			}
-			/* Otherwise this is most likely the service-name delimiter. */
-			*p = 0;
-			return;
-		}
-		++p;
-	}
+	grab_cut_service_name_suffix_inplace(url);
 }
 
 static int grab_extract_embedded_stream_url(const char *sref, char *out, size_t out_len)
